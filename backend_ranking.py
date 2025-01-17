@@ -16,82 +16,13 @@ from sklearn.neighbors import NearestNeighbors
 
 import pandas as pd
 
-file_path = 'many.csv'
+#only change file name here
+file_name='mini'
+
+file_path = f"{file_name}.csv"
 data = pd.read_csv(file_path)
 
-# Display the first few rows
-print(data.head())
-
-import requests
-import pandas as pd
-from itertools import combinations
-
-def get_osrm_distance(coord1, coord2, profile='driving'):
-    base_url = "http://router.project-osrm.org/route/v1"
-    coords = f"{coord1[1]},{coord1[0]};{coord2[1]},{coord2[0]}"
-    url = f"{base_url}/{profile}/{coords}"
-
-    try:
-        response = requests.get(url, params={"overview": "false"})
-        response.raise_for_status()
-        data = response.json()
-        distance = data['routes'][0]['distance']  # Distance in meters
-        return distance
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching OSRM data: {e}")
-        return None
-
-def calculate_distances_from_csv(file_path):
-    locations = list(zip(data['lat'], data['lon']))
-    location_names = data['name'].tolist()
-
-    # Generate all pairs of locations
-    pairs = list(combinations(enumerate(locations), 2))  # List of ((index1, coord1), (index2, coord2))
-
-    # Calculate distances for each pair
-    results = []
-    for (idx1, coord1), (idx2, coord2) in pairs:
-        distance = get_osrm_distance(coord1, coord2)
-        results.append({
-            'Location1': location_names[idx1],
-            'Location2': location_names[idx2],
-            'Distance (meters)': distance
-        })
-
-    # Convert results to a DataFrame
-    return pd.DataFrame(results)
-
-import folium
-import pandas as pd
-from folium import Map, CircleMarker
-from itertools import cycle
-
-
-# Assign a unique color to each company
-colors = cycle(['red', 'blue', 'green', 'orange', 'purple'])  # Add more colors if needed
-company_colors = {company: next(colors) for company in data['name'].unique()}
-
-# Create a base map
-m = folium.Map(location=[52.35, 4.85], zoom_start=12)
-
-# Add points for each location
-for _, row in data.iterrows():
-    folium.CircleMarker(
-        location=[row['lat'], row['lon']],
-        radius=8,
-        color=company_colors[row['name']],
-        fill=True,
-        fill_color=company_colors[row['name']],
-        popup=f"Company: {row['name']}"
-    ).add_to(m)
-
-# Save and display the map
-m.save("company_map.html")
-m
-
-!pip install joblib
-
-
+"""# Bounding box"""
 
 # Bounding box - Technique 2
 
@@ -213,107 +144,131 @@ print(ranked_pairs_by_overlap)
 from IPython.display import IFrame
 IFrame('company_map.html', width=700, height=500)
 
-# Good clustering
+"""# Clustering"""
+
+#create clusters
 
 from sklearn.cluster import DBSCAN
 import folium
 import pandas as pd
+from matplotlib import colormaps
+import random
 
-# Perform DBSCAN clustering
-coords = data[['lat', 'lon']].values
-dbscan = DBSCAN(eps=0.3, min_samples=2).fit(coords)
-data['cluster'] = dbscan.labels_
+distance_matrices = {
+    'mini': pd.read_csv('distance_matrix_mini1.csv', index_col=0).values,
+    'medium': pd.read_csv('distance_matrix_medium.csv', index_col=0).values,
+    'many': pd.read_csv('distance_matrix_many.csv', index_col=0).values,
+    'manyLarge': pd.read_csv('distance_matrix_manyLarge.csv', index_col=0).values,
+    'Amsterdam': pd.read_csv('distance_matrix_Amsterdam.csv', index_col=0).values
+}
 
-# Visualize clusters on a map
-def plot_dbscan_clusters(data, map_center):
-    m = folium.Map(location=map_center, zoom_start=12)
-    colors = ['blue', 'green', 'purple', 'orange', 'darkred']
 
-    for _, row in data.iterrows():
-        cluster = row['cluster']
-        color = colors[cluster % len(colors)] if cluster != -1 else 'gray'  # Outliers in gray
-        folium.Marker(
-            location=(row['lat'], row['lon']),
-            popup=f"Cluster {cluster}",
-            icon=folium.Icon(color=color, icon='info-sign')
-        ).add_to(m)
+eps_values = {
+    'mini': 50000,
+    'medium': 20000,
+    'many': 10000,
+    'manyLarge': 5000,
+    'Amsterdam': 1000
+}
 
-    return m
 
-map_center = [52.37, 4.89]  # Approx. center of Amsterdam
-map_result = plot_dbscan_clusters(data, map_center)
+distance_matrix = distance_matrices[file_name]
 
-# Display the map
-map_result
 
-# rank and choose partnerships
+def get_clusters_for_file(file_name):
+    if file_name not in distance_matrices:
+        raise ValueError(f"File name {file_name} not found in distance matrices.")
 
-import pandas as pd
-from itertools import combinations
-from sklearn.metrics.pairwise import haversine_distances
+
+    # Get the corresponding eps value
+    eps = eps_values.get(file_name)
+    if eps is None:
+        raise ValueError(f"No eps value defined for file {file_name}.")
+
+    # Perform DBSCAN clustering
+    dbscan = DBSCAN(eps=eps, min_samples=2, metric='precomputed')
+    labels = dbscan.fit_predict(distance_matrix)
+
+    return labels
+
+# ranking partnerships
+
 import numpy as np
+from itertools import combinations
+from geopy.distance import geodesic
+import pandas as pd
 
-# Function to compute average inter-cluster distance
+# Function to rank partnerships using clusters
+def rank_partnerships_using_clusters(data, labels, distance_matrix):
+    # Add the cluster labels to the original data
+    data['cluster'] = labels
 
-def compute_cluster_distance(company1_data, company2_data):
-    distances = []
-    for _, row1 in company1_data.iterrows():
-        for _, row2 in company2_data.iterrows():
-            coord1 = np.radians([row1['lat'], row1['lon']])
-            coord2 = np.radians([row2['lat'], row2['lon']])
-            dist = haversine_distances([coord1, coord2])[0, 1] * 6371  # Radius of Earth in km
-            distances.append(dist)
-    return np.mean(distances)
+    # Group data by cluster
+    clustered_data = data.groupby('cluster')
 
-# Generate all company pairs
-companies = data['name'].unique()
-partnerships = list(combinations(companies, 2))
+    partnerships = []
 
-# Evaluate each partnership
-results = []
-for company1, company2 in partnerships:
-    company1_data = data[data['name'] == company1]
-    company2_data = data[data['name'] == company2]
+    # For each cluster
+    for cluster_id, group in clustered_data:
+        if cluster_id == -1:
+            continue  # Skip noise points
 
-    # Filter to compatible clusters (same cluster ID)
-    compatible_clusters = company1_data.merge(company2_data, on='cluster', suffixes=('_1', '_2'))
+        # Extract unique companies in the cluster
+        companies = group['name'].unique()
 
-    if not compatible_clusters.empty:
-        # Compute average distance between clusters
-        avg_distance = compute_cluster_distance(company1_data, company2_data)
-        score = len(compatible_clusters) / avg_distance  # Higher is better (more compatible points, closer)
-    else:
-        avg_distance = compute_cluster_distance(company1_data, company2_data)
-        score = 0  # No compatible clusters
+        # Calculate pairwise partnerships for companies in the cluster
+        for company1, company2 in combinations(companies, 2):
+            # Get indices for locations of each company
+            indices1 = group[group['name'] == company1].index
+            indices2 = group[group['name'] == company2].index
 
-    results.append({
-        'Partnership': f"{company1} & {company2}",
-        'Average Distance (km)': avg_distance,
-        'Score': score
-    })
+            # Compute distances based on the distance matrix
+            distances = [
+                distance_matrix[i, j] for i in indices1 for j in indices2
+            ]
 
-# Create a results DataFrame and rank by score
-results_df = pd.DataFrame(results).sort_values(by='Score', ascending=False)
-print(results_df)
+            # Calculate the heuristic (e.g., average distance)
+            avg_distance = np.mean(distances)
+            partnerships.append((cluster_id, company1, company2, avg_distance))
 
-# Ranked partnerships from the heuristic
-ranked_partnerships = results_df.copy()
+    # Sort partnerships by average distance (ascending)
+    partnerships.sort(key=lambda x: x[3])
+    return partnerships
 
-# Initialize selected partnerships and a set to track used companies
-selected_partnerships = []
-used_companies = set()
+"""# Frontend - calling of functions + map of clusters"""
 
-# Iteratively select the best partnerships
-for _, row in ranked_partnerships.iterrows():
-    partnership = row['Partnership']
-    company1, company2 = partnership.split(' & ')
+# how to call function from the frontend
+labels = get_clusters_for_file(file_name)
 
-    # Check if either company is already paired
-    if company1 not in used_companies and company2 not in used_companies:
-        selected_partnerships.append(partnership)
-        used_companies.update([company1, company2])  # Mark companies as used
+ranked_partnerships = rank_partnerships_using_clusters(data, labels, distance_matrix)
 
-# Display selected partnerships
-print("Optimal Partnerships:")
-for p in selected_partnerships:
-    print(p)
+# Display results
+for partnership in ranked_partnerships:
+    print(f"Cluster {partnership[0]}: {partnership[1]} - {partnership[2]}, Avg Distance: {partnership[3]:.2f}")
+
+import folium
+from matplotlib import colormaps
+import random
+
+# Create a base map centered around the first point
+base_map = folium.Map(location=[data['lat'].mean(), data['lon'].mean()], zoom_start=13)
+
+unique_labels = set(labels)
+color_map = {label: f'#{random.randint(0, 0xFFFFFF):06x}' for label in unique_labels}
+
+# Add points to the map
+for idx, (lat, lon, label) in enumerate(zip(data['lat'], data['lon'], labels)):
+    color = color_map[label] if label != -1 else 'gray'
+    popup_text = f"Index: {idx}, Cluster: {label}"
+    folium.CircleMarker(
+        location=(lat, lon),
+        radius=5,
+        color=color,
+        fill=True,
+        fill_opacity=0.7,
+        popup=popup_text
+    ).add_to(base_map)
+
+# Save the map to an HTML file or display it
+base_map.save('clusters_map.html')  # Save the map to a file
+base_map  # Display the map in a Jupyter notebook
