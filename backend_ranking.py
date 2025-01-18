@@ -32,6 +32,7 @@ from shapely.geometry import Polygon
 from itertools import combinations
 from functools import lru_cache
 import requests
+import folium
 from joblib import Parallel, delayed
 from numba import jit
 import numpy as np
@@ -60,8 +61,12 @@ def get_osrm_distance(coord1, coord2, profile='driving'):
 DEPOT_LAT, DEPOT_LON = 52.333847, 4.865261  # Example coordinates
 central_depot = (DEPOT_LAT, DEPOT_LON)
 
+"""# Bounding Box"""
 # Function to calculate bounding boxes
 def calculate_bounding_boxes(data):
+    """
+    Calculate the bounding boxes for each company.
+    """
     bounding_boxes = {}
     for company in data['name'].unique():
         company_data = data[data['name'] == company]
@@ -77,11 +82,12 @@ def calculate_bounding_boxes(data):
         }
     return bounding_boxes
 
-# Function to calculate overlap area using shapely
+# Function to calculate overlap area using bounding boxes
 def calculate_overlap_area(box1, box2):
     """
-    Use shapely to calculate the overlap area between two bounding boxes.
+    Calculate overlap area between two bounding boxes.
     """
+    # Define bounding box polygons
     polygon1 = Polygon([
         (box1['min_lon'], box1['min_lat']),
         (box1['max_lon'], box1['min_lat']),
@@ -94,52 +100,117 @@ def calculate_overlap_area(box1, box2):
         (box2['max_lon'], box2['max_lat']),
         (box2['min_lon'], box2['max_lat'])
     ])
+
+    # Calculate intersection area
     if polygon1.intersects(polygon2):
         return polygon1.intersection(polygon2).area
     return 0
 
-# Function to calculate overlap area using OSRM distances
-def calculate_overlap_area_osrm(box1, box2):
+# Function to calculate bounding box area
+def calculate_bounding_box_area(box):
     """
-    Use OSRM distances to refine bounding box overlap.
+    Calculate the area of a bounding box.
     """
-    # Calculate the corners of the overlapping bounding box
-    overlap_min_lat = max(box1['min_lat'], box2['min_lat'])
-    overlap_max_lat = min(box1['max_lat'], box2['max_lat'])
-    overlap_min_lon = max(box1['min_lon'], box2['min_lon'])
-    overlap_max_lon = min(box1['max_lon'], box2['max_lon'])
+    width = box['max_lon'] - box['min_lon']
+    height = box['max_lat'] - box['min_lat']
+    return width * height
 
-    # Check if there is an actual overlap
-    if overlap_min_lat < overlap_max_lat and overlap_min_lon < overlap_max_lon:
-        # Calculate OSRM distances for the diagonal of the overlap
-        top_left = (overlap_max_lat, overlap_min_lon)
-        bottom_right = (overlap_min_lat, overlap_max_lon)
-        overlap_distance = get_osrm_distance(top_left, bottom_right)
-
-        # Approximate the area as a square using this distance
-        return (overlap_distance ** 2) / 2 if overlap_distance else 0
-    else:
-        return 0  # No overlap
-
-# Function to evaluate a partnership
-def rank_company_pairs_by_overlap(data):
+# Function to rank company pairs by overlap percentage
+def rank_company_pairs_by_overlap_percentage(data):
+    """
+    Rank company pairs based on overlap percentage using bounding boxes.
+    """
+    # Calculate bounding boxes
     bounding_boxes = calculate_bounding_boxes(data)
-    rankings = []
 
+    # Calculate rankings
+    rankings = []
     for (company1, box1), (company2, box2) in combinations(bounding_boxes.items(), 2):
         # Calculate overlap area
-        overlap_area = calculate_overlap_area_osrm(box1, box2)
+        overlap_area = calculate_overlap_area(box1, box2)
 
-        rankings.append((company1, company2, overlap_area))
+        # Calculate bounding box areas
+        area1 = calculate_bounding_box_area(box1)
+        area2 = calculate_bounding_box_area(box2)
+        total_area = area1 + area2
 
-    # Sort by overlap area in descending order (higher overlap is better)
+        # Calculate overlap percentage
+        overlap_percentage = (overlap_area / total_area * 100) if total_area > 0 else 0
+
+        # Append results
+        rankings.append((company1, company2, overlap_percentage))
+
+    # Sort by overlap percentage in descending order
     rankings.sort(key=lambda x: x[2], reverse=True)
 
-    return pd.DataFrame(rankings, columns=['Company1', 'Company2', 'Overlap Area'])
+    return pd.DataFrame(rankings, columns=['Company1', 'Company2', 'Overlap Percentage'])
+
+# Function to visualize bounding boxes on a map
+def visualize_bounding_boxes(data):
+    """
+    Visualize bounding boxes for each company on a map.
+    """
+    bounding_boxes = calculate_bounding_boxes(data)
+    colors = ['red', 'blue', 'green', 'purple', 'orange']
+    company_colors = {company: colors[i % len(colors)] for i, company in enumerate(bounding_boxes.keys())}
+
+    # Create the map
+    map_center = [data['lat'].mean(), data['lon'].mean()]
+    m = folium.Map(location=map_center, zoom_start=12)
+
+    # Add bounding boxes
+    for company, box in bounding_boxes.items():
+        bounds = [
+            [box['min_lat'], box['min_lon']],
+            [box['max_lat'], box['min_lon']],
+            [box['max_lat'], box['max_lon']],
+            [box['min_lat'], box['max_lon']],
+            [box['min_lat'], box['min_lon']]
+        ]
+        folium.PolyLine(bounds, color=company_colors[company], weight=2, popup=company).add_to(m)
+
+    # Add company points
+    for _, row in data.iterrows():
+        folium.CircleMarker(
+            location=[row['lat'], row['lon']],
+            radius=5,
+            color=company_colors[row['name']],
+            fill=True,
+            popup=row['name']
+        ).add_to(m)
+
+    # Save the map
+    m.save("bounding_boxes_map.html")
+    return m
 
 
-ranked_pairs_by_overlap = rank_company_pairs_by_overlap(data)
-print(ranked_pairs_by_overlap)
+# Rank company pairs by overlap percentage
+ranked_pairs = rank_company_pairs_by_overlap_percentage(data)
+print(ranked_pairs)
+
+def get_best_partnerships(ranked_pairs):
+    used_companies = set()
+    best_partnerships = []
+
+    for _, row in ranked_pairs.iterrows():
+        company1, company2, overlap_percentage = row['Company1'], row['Company2'], row['Overlap Percentage']
+        if company1 not in used_companies and company2 not in used_companies:
+            best_partnerships.append(row)
+            used_companies.add(company1)
+            used_companies.add(company2)
+
+    return pd.DataFrame(best_partnerships, columns=ranked_pairs.columns)
+
+# Example: Get the best partnerships
+ranked_pairs = rank_company_pairs_by_overlap_percentage(data)
+best_partnerships = get_best_partnerships(ranked_pairs)
+print("Best Partnerships Without Repetition:")
+print(best_partnerships)
+
+# Visualize bounding boxes on a map
+map_result = visualize_bounding_boxes(data)
+map_result
+
 
 from IPython.display import IFrame
 IFrame('company_map.html', width=700, height=500)
