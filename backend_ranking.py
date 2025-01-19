@@ -193,13 +193,17 @@ def get_best_partnerships(ranked_pairs):
     best_partnerships = []
 
     for _, row in ranked_pairs.iterrows():
+      if 'Overlap Percentage' in row:
         company1, company2, overlap_percentage = row['Company1'], row['Company2'], row['Overlap Percentage']
-        if company1 not in used_companies and company2 not in used_companies:
+      else:
+          company1, company2, avg_distance = row['Company1'], row['Company2'], row['Average Distance']
+      if company1 not in used_companies and company2 not in used_companies:
             best_partnerships.append(row)
             used_companies.add(company1)
             used_companies.add(company2)
 
     return pd.DataFrame(best_partnerships, columns=ranked_pairs.columns)
+
 
 # Example: Get the best partnerships
 ranked_pairs = rank_company_pairs_by_overlap_percentage(data)
@@ -243,7 +247,9 @@ eps_values = {
 }
 
 
-distance_matrix = distance_matrices[file_name]
+distance_matrix_with_depot = distance_matrices[file_name]
+distance_matrix = distance_matrix_with_depot[:-1, :-1]	
+
 
 
 def get_clusters_for_file(file_name):
@@ -304,7 +310,7 @@ def rank_partnerships_using_clusters(data, labels, distance_matrix):
 
     # Sort partnerships by average distance (ascending)
     partnerships.sort(key=lambda x: x[3])
-    return partnerships
+    return pd.DataFrame(partnerships, columns=['Cluster ID', 'Company1', 'Company2', 'Average Distance'])
 
 """# Frontend - calling of functions + map of clusters"""
 
@@ -313,9 +319,7 @@ labels = get_clusters_for_file(file_name)
 
 ranked_partnerships = rank_partnerships_using_clusters(data, labels, distance_matrix)
 
-# Display results
-for partnership in ranked_partnerships:
-    print(f"Cluster {partnership[0]}: {partnership[1]} - {partnership[2]}, Avg Distance: {partnership[3]:.2f}")
+selected_partnerships_cluster = get_best_partnerships(ranked_partnerships)
 
 import folium
 from matplotlib import colormaps
